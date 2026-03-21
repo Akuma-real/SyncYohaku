@@ -1,44 +1,208 @@
-name: Sync Yohaku main only
+name: Sync, Build and Publish Yohaku
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "7/5 * * * *"
+  repository_dispatch:
+    types: [trigger-workflow]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-build-yohaku-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HASH_FILE: build_hash
+  SOURCE_REPO: innei-dev/Yohaku
+  TARGET_REPO: Akuma-real/Yohaku
+  TARGET_BRANCH: main
+  IMAGE_NAME: ghcr.io/akuma-real/yohaku
 
 jobs:
-  sync-main:
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
+    outputs:
+      hash_content: ${{ steps.read_hash.outputs.hash_content }}
 
     steps:
-      - name: Sync upstream main to target main and prune other branches
+      - name: Checkout SyncYohaku
+        uses: actions/checkout@v4
+
+      - name: Read HASH_FILE content
+        id: read_hash
+        run: |
+          content=$(cat "${HASH_FILE}" 2>/dev/null || true)
+          echo "hash_content=$content" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: Check Should Rebuild
+    runs-on: ubuntu-latest
+    needs: prepare
+    outputs:
+      canceled: ${{ steps.compare.outputs.canceled }}
+      sha_short: ${{ steps.compare.outputs.sha_short }}
+      sha_full: ${{ steps.compare.outputs.sha_full }}
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ secrets.PAT }}
+          fetch-depth: 1
+          lfs: true
+
+      - name: Checkout LFS objects if any
+        run: git lfs checkout || true
+
+      - name: Compare source hash with stored hash
+        id: compare
+        env:
+          FILE_HASH: ${{ needs.prepare.outputs.hash_content }}
+        run: |
+          sha_short=$(git rev-parse --short HEAD)
+          sha_full=$(git rev-parse HEAD)
+
+          echo "sha_short=$sha_short" >> "$GITHUB_OUTPUT"
+          echo "sha_full=$sha_full" >> "$GITHUB_OUTPUT"
+
+          echo "Stored Hash: ${FILE_HASH}"
+          echo "Current Hash: ${sha_short}"
+
+          if [ "${FILE_HASH}" = "${sha_short}" ]; then
+            echo "No upstream change. Skip."
+            echo "canceled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream changed. Continue."
+            echo "canceled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  sync_code:
+    name: Sync source main to target main
+    runs-on: ubuntu-latest
+    needs: check
+    if: ${{ needs.check.outputs.canceled != 'true' }}
+
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.check.outputs.sha_full }}
+          token: ${{ secrets.PAT }}
+          fetch-depth: 1
+
+      - name: Push source commit to target main only
         env:
           PAT: ${{ secrets.PAT }}
-          SOURCE_REPO: innei-dev/Yohaku
-          TARGET_REPO: Akuma-real/Yohaku
         run: |
           set -euo pipefail
 
-          SOURCE_URL="https://x-access-token:${PAT}@github.com/${SOURCE_REPO}.git"
-          TARGET_URL="https://x-access-token:${PAT}@github.com/${TARGET_REPO}.git"
+          git remote add target "https://x-access-token:${PAT}@github.com/${TARGET_REPO}.git"
 
-          rm -rf repo
-          git clone \
-            --single-branch \
-            --branch main \
-            "${SOURCE_URL}" \
-            repo
+          # 只同步 main
+          git push target +HEAD:refs/heads/${TARGET_BRANCH}
 
-          cd repo
-
-          # 只强制同步 main -> main
-          git push "${TARGET_URL}" +refs/heads/main:refs/heads/main
-
-          # 删除目标仓库中除 main 外的所有远程分支
-          git ls-remote --heads "${TARGET_URL}" \
+          # 删除目标仓库除 main 外的其他远程分支
+          git ls-remote --heads target \
             | awk '{sub("refs/heads/","",$2); print $2}' \
-            | grep -v '^main$' \
+            | grep -v "^${TARGET_BRANCH}$" \
             | while read -r branch; do
                 [ -n "${branch}" ] || continue
                 echo "Deleting remote branch: ${branch}"
-                git push "${TARGET_URL}" --delete "${branch}"
+                git push target --delete "${branch}"
               done
+
+  build_image:
+    name: Build and Publish Docker image
+    runs-on: ubuntu-latest
+    needs: [check, sync_code]
+    if: ${{ needs.check.outputs.canceled != 'true' }}
+
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.check.outputs.sha_full }}
+          token: ${{ secrets.PAT }}
+          fetch-depth: 1
+          lfs: true
+
+      - name: Checkout LFS objects if any
+        run: git lfs checkout || true
+
+      - name: Create fallback Dockerfile when repo has none
+        run: |
+          if [ ! -f Dockerfile ]; then
+            cat > Dockerfile <<'EOF'
+            FROM node:22-alpine
+            WORKDIR /app
+            RUN apk add --no-cache libc6-compat
+            RUN corepack enable
+
+            COPY package.json pnpm-lock.yaml* ./
+            RUN pnpm install --frozen-lockfile
+
+            COPY . .
+            RUN pnpm build
+
+            EXPOSE 3000
+            CMD ["pnpm", "start"]
+            EOF
+          fi
+
+      - name: Login to GHCR
+        env:
+          PAT: ${{ secrets.PAT }}
+        run: |
+          echo "${PAT}" | docker login ghcr.io -u Akuma-real --password-stdin
+
+      - name: Build image
+        run: |
+          docker build \
+            --label org.opencontainers.image.source=https://github.com/${TARGET_REPO} \
+            --label org.opencontainers.image.revision=${{ needs.check.outputs.sha_full }} \
+            -t ${IMAGE_NAME}:main \
+            -t ${IMAGE_NAME}:${{ needs.check.outputs.sha_short }} \
+            .
+
+      - name: Push image
+        run: |
+          docker push ${IMAGE_NAME}:main
+          docker push ${IMAGE_NAME}:${{ needs.check.outputs.sha_short }}
+
+  store:
+    name: Store artifact commit version
+    runs-on: ubuntu-latest
+    needs: [check, build_image]
+    if: ${{ needs.check.outputs.canceled != 'true' }}
+
+    steps:
+      - name: Checkout SyncYohaku
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Write hash to file
+        run: echo "${{ needs.check.outputs.sha_short }}" > "${HASH_FILE}"
+
+      - name: Commit files
+        run: |
+          set -euo pipefail
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add "${HASH_FILE}"
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Update hash file"
+          git push
