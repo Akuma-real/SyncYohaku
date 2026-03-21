@@ -18,8 +18,11 @@ env:
   HASH_FILE: build_hash
   SOURCE_REPO: innei-dev/Yohaku
   TARGET_REPO: Akuma-real/Yohaku
+  CNB_REPO: june-ink/yohaku
+  CNB_REPO_URL: https://cnb.cool/june-ink/yohaku.git
   TARGET_BRANCH: main
   IMAGE_NAME: ghcr.io/akuma-real/yohaku
+  CNB_IMAGE: docker.cnb.cool/june-ink/yohaku
 
 jobs:
   prepare:
@@ -83,7 +86,7 @@ jobs:
           fi
 
   sync_code:
-    name: 同步源 main 到目标 main
+    name: 同步源 main 到 GitHub 与 CNB 目标 main
     runs-on: ubuntu-latest
     needs: check
     if: ${{ needs.check.outputs.canceled != 'true' }}
@@ -97,36 +100,46 @@ jobs:
           token: ${{ secrets.PAT }}
           fetch-depth: 1
 
-      - name: 仅推送源提交到目标 main
+      - name: 推送源提交到 GitHub 与 CNB 目标 main
         env:
           PAT: ${{ secrets.PAT }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
 
           git remote add target "https://x-access-token:${PAT}@github.com/${TARGET_REPO}.git"
+          git remote add cnb "https://cnb:${CNB_TOKEN}@${CNB_REPO_URL#https://}"
+
+          cleanup_remote_branches() {
+            local remote_name="$1"
+            local remote_label="$2"
+            mapfile -t branches_to_delete < <(
+              git ls-remote --heads "${remote_name}" \
+                | awk '{sub("refs/heads/","",$2); print $2}' \
+                | grep -v "^${TARGET_BRANCH}$" || true
+            )
+
+            if [ "${#branches_to_delete[@]}" -eq 0 ]; then
+              echo "${remote_label} 没有需要删除的远程分支。"
+              return
+            fi
+
+            for branch in "${branches_to_delete[@]}"; do
+              [ -n "${branch}" ] || continue
+              echo "正在删除 ${remote_label} 远程分支: ${branch}"
+              git push "${remote_name}" --delete "${branch}"
+            done
+          }
 
           # 只同步 main
           git push target +HEAD:refs/heads/${TARGET_BRANCH}
+          git push cnb +HEAD:refs/heads/${TARGET_BRANCH}
 
-          # 删除目标仓库除 main 外的其他远程分支
-          mapfile -t branches_to_delete < <(
-            git ls-remote --heads target \
-              | awk '{sub("refs/heads/","",$2); print $2}' \
-              | grep -v "^${TARGET_BRANCH}$" || true
-          )
-
-          if [ "${#branches_to_delete[@]}" -eq 0 ]; then
-            echo "没有需要删除的远程分支。"
-          else
-            for branch in "${branches_to_delete[@]}"; do
-              [ -n "${branch}" ] || continue
-              echo "正在删除远程分支: ${branch}"
-              git push target --delete "${branch}"
-            done
-          fi
+          cleanup_remote_branches target "GitHub"
+          cleanup_remote_branches cnb "CNB"
 
   build_image:
-    name: 构建并发布 Docker 镜像
+    name: 构建并发布 Docker 镜像到 GHCR 与 CNB
     runs-on: ubuntu-latest
     needs: [check, sync_code]
     if: ${{ needs.check.outputs.canceled != 'true' }}
@@ -150,19 +163,32 @@ jobs:
         run: |
           echo "${PAT}" | docker login ghcr.io -u Akuma-real --password-stdin
 
+      - name: 登录 CNB 制品库
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          echo "${CNB_TOKEN}" | docker login docker.cnb.cool -u cnb --password-stdin
+
       - name: 构建镜像
         run: |
           docker build \
             --label org.opencontainers.image.source=https://github.com/${TARGET_REPO} \
             --label org.opencontainers.image.revision=${{ needs.check.outputs.sha_full }} \
-            -t ${IMAGE_NAME}:main \
+            -t ${IMAGE_NAME}:latest \
             -t ${IMAGE_NAME}:${{ needs.check.outputs.sha_short }} \
+            -t ${CNB_IMAGE}:latest \
+            -t ${CNB_IMAGE}:${{ needs.check.outputs.sha_short }} \
             .
 
-      - name: 推送镜像
+      - name: 推送镜像到 GHCR
         run: |
-          docker push ${IMAGE_NAME}:main
+          docker push ${IMAGE_NAME}:latest
           docker push ${IMAGE_NAME}:${{ needs.check.outputs.sha_short }}
+
+      - name: 推送镜像到 CNB 制品库
+        run: |
+          docker push ${CNB_IMAGE}:latest
+          docker push ${CNB_IMAGE}:${{ needs.check.outputs.sha_short }}
 
   store:
     name: 记录构建产物提交版本
