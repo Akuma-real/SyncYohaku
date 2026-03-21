@@ -1,0 +1,26 @@
+name: Mirror Yohaku
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7/5 * * * *"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Mirror private upstream to target
+        env:
+          SOURCE_PAT: ${{ secrets.PAT }}
+          TARGET_PAT: ${{ secrets.PAT }}
+          SOURCE_REPO: innei-dev/Yohaku
+          TARGET_REPO: Akuma-real/Yohaku
+        run: |
+          set -euo pipefail
+
+          rm -rf repo.git
+          git clone --mirror "https://x-access-token:${SOURCE_PAT}@github.com/${SOURCE_REPO}.git" repo.git
+          cd repo.git
+
+          git push --mirror "https://x-access-token:${TARGET_PAT}@github.com/${TARGET_REPO}.git"
