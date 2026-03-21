@@ -98,7 +98,7 @@ jobs:
           repository: ${{ env.SOURCE_REPO }}
           ref: ${{ needs.check.outputs.sha_full }}
           token: ${{ secrets.PAT }}
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: 推送源提交到 GitHub 与 CNB 目标 main
         env:
