@@ -158,39 +158,40 @@ jobs:
       - name: 检出 LFS 对象（如果存在）
         run: git lfs checkout || true
 
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: 登录 GHCR
-        env:
-          PAT: ${{ secrets.PAT }}
-        run: |
-          echo "${PAT}" | docker login ghcr.io -u Akuma-real --password-stdin
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: Akuma-real
+          password: ${{ secrets.PAT }}
 
       - name: 登录 CNB 制品库
-        env:
-          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-        run: |
-          echo "${CNB_TOKEN}" | docker login docker.cnb.cool -u cnb --password-stdin
+        uses: docker/login-action@v3
+        with:
+          registry: docker.cnb.cool
+          username: cnb
+          password: ${{ secrets.CNB_TOKEN }}
 
-      - name: 构建镜像
-        run: |
-          docker build \
-            --build-arg BASE_URL=${BASE_URL} \
-            --label org.opencontainers.image.source=https://github.com/${TARGET_REPO} \
-            --label org.opencontainers.image.revision=${{ needs.check.outputs.sha_full }} \
-            -t ${IMAGE_NAME}:latest \
-            -t ${IMAGE_NAME}:${{ needs.check.outputs.sha_short }} \
-            -t ${CNB_IMAGE}:latest \
-            -t ${CNB_IMAGE}:${{ needs.check.outputs.sha_short }} \
-            .
-
-      - name: 推送镜像到 GHCR
-        run: |
-          docker push ${IMAGE_NAME}:latest
-          docker push ${IMAGE_NAME}:${{ needs.check.outputs.sha_short }}
-
-      - name: 推送镜像到 CNB 制品库
-        run: |
-          docker push ${CNB_IMAGE}:latest
-          docker push ${CNB_IMAGE}:${{ needs.check.outputs.sha_short }}
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            BASE_URL=${{ env.BASE_URL }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.TARGET_REPO }}
+            org.opencontainers.image.revision=${{ needs.check.outputs.sha_full }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ needs.check.outputs.sha_short }}
+            ${{ env.CNB_IMAGE }}:latest
+            ${{ env.CNB_IMAGE }}:${{ needs.check.outputs.sha_short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   store:
     name: 记录构建产物提交版本
