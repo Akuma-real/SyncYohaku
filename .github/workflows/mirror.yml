@@ -23,6 +23,8 @@ env:
   TARGET_BRANCH: main
   IMAGE_NAME: ghcr.io/akuma-real/yohaku
   CNB_IMAGE: docker.cnb.cool/june-ink/yohaku
+  NEXT_PUBLIC_API_URL: https://june.ink/api/v2
+  NEXT_PUBLIC_GATEWAY_URL: https://june.ink
 
 jobs:
   prepare:
@@ -172,6 +174,8 @@ jobs:
       - name: 构建镜像
         run: |
           docker build \
+            --build-arg NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} \
+            --build-arg NEXT_PUBLIC_GATEWAY_URL=${NEXT_PUBLIC_GATEWAY_URL} \
             --label org.opencontainers.image.source=https://github.com/${TARGET_REPO} \
             --label org.opencontainers.image.revision=${{ needs.check.outputs.sha_full }} \
             -t ${IMAGE_NAME}:latest \
