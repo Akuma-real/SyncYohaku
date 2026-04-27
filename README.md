@@ -29,9 +29,11 @@
 submodule 和 LFS，然后检查 `@yohaku/design-system` 是否对根 pnpm workspace
 可见。
 
-如果该包存在于 `design-oss/design-system`，但尚未被根 workspace 纳入，Docker 构建前
-会只在 GitHub Actions 的临时构建目录中向 `pnpm-workspace.yaml` 追加该路径。这个补丁
-不会提交到上游，也不会推送到目标仓；目标仓仍保持对上游 `main` 的原样同步。
+当前上游通过 `packages/design-system` symlink 指向 `design-oss/design-system`。
+工作流会初始化 submodule，并在预检中跟随该 symlink。若未来上游缺少这个 symlink，
+但 `design-oss/design-system` 仍存在，Docker 构建前会只在 GitHub Actions 的临时构建
+目录中复制一份到 `packages/design-system` 作为兜底。这个补丁不会提交到上游，也不会
+推送到目标仓；目标仓仍保持对上游 `main` 的原样同步。
 
 如果依赖包完全缺失，后续同步、Docker 构建和 `build_hash` 更新都会跳过，工作流保持成功
 结束，并在日志中输出原因。下一次定时任务会继续检查同一个上游提交。
